@@ -13,6 +13,7 @@ import { auth, db } from '../firebase';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { saveSimulation } from '../utils/simulations';
 import { enqueueSimulationTransferJob } from '../utils/simulationTransferJobs';
+import { trackLead } from '../lib/tracking';
 registerLocale("pt", pt);
 registerLocale("en", enGB);
 
@@ -98,18 +99,23 @@ export default function SimulacaoAuto() {
   // Listener em tempo real ao job de transferência — actualiza simulationResult quando o Playwright terminar
   useEffect(() => {
     if (!transferJobId) return;
-    // Timeout de 2,5 minutos — se o script não terminar, mostra erro
+    // Timeout de 6 minutos — fluxos reais podem demorar alguns minutos
     const timeoutId = setTimeout(() => {
       setSimulationResult({ status: 'failed' });
-    }, 2.5 * 60 * 1000);
+    }, 6 * 60 * 1000);
     const unsub = onSnapshot(doc(db, 'simulationTransferJobs', transferJobId), (snap) => {
       if (!snap.exists()) return;
       const data = snap.data();
-      if (data?.status === 'completed' && data?.result?.accordionValues) {
+      const status = data?.status;
+      const resultCandidate = (data?.result && typeof data.result === 'object') ? data.result : data;
+      const accordionValues = resultCandidate?.accordionValues;
+      const hasAccordionValues = !!accordionValues && Object.values(accordionValues).some(Boolean);
+      const isCompleted = status === 'completed' || status === 'done';
+      if (isCompleted && hasAccordionValues) {
         clearTimeout(timeoutId);
-        setSimulationResult(data.result);
+        setSimulationResult({ ...resultCandidate, status: 'completed' });
         setStep(4);
-      } else if (data?.status === 'failed' || (data?.status === 'completed' && !data?.result?.accordionValues)) {
+      } else if (status === 'failed' || (isCompleted && !hasAccordionValues)) {
         clearTimeout(timeoutId);
         setSimulationResult({ status: 'failed' });
         setStep(4);
@@ -120,6 +126,7 @@ export default function SimulacaoAuto() {
 
   // Determina a "marca" do site actual (para assinatura dinâmica no email)
   const host = typeof window !== 'undefined' ? window.location.hostname.toLowerCase() : '';
+  const pathname = typeof window !== 'undefined' ? window.location.pathname.toLowerCase() : '';
   let siteBrand = 'Ansião';
   if (host.includes('aurelio')) siteBrand = 'Aurélio';
   else if (host.includes('sintraseg') || host.includes('sintra')) siteBrand = 'Sintra';
@@ -127,6 +134,9 @@ export default function SimulacaoAuto() {
   else if (host.includes('povoaseg') || host.includes('povoa')) siteBrand = 'Póvoa';
   else if (host.includes('lisboaseg') || host.includes('lisboa')) siteBrand = 'Lisboa';
   else if (host.includes('portoseg') || host.includes('porto')) siteBrand = 'Porto';
+  const landingSource = pathname.includes('/povoa-auto') || (typeof document !== 'undefined' && document.referrer.includes('/povoa-auto'))
+    ? 'povoa-auto'
+    : 'direct';
 
 
   function handleChange(e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) {
@@ -377,6 +387,13 @@ export default function SimulacaoAuto() {
   console.log('[EmailJS][Auto] Sending', { service: EMAILJS_SERVICE_ID, template: EMAILJS_TEMPLATE_ID });
   const resp = await safeEmailSend(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, templateParams, EMAILJS_USER_ID);
   console.log('[EmailJS][Auto] Success', resp?.status, resp?.text);
+      trackLead({
+        lead_type: 'auto_quote',
+        page: 'simulacao-auto',
+        language: base,
+        source_landing: landingSource,
+        insurance_type: form.tipoSeguro,
+      });
       setMensagem(t('messages.submitSuccess'));
       setMensagemTipo('sucesso');
       // Avança para o passo 4 (aguarda resultados via listener Firestore)
